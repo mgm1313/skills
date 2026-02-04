@@ -3,7 +3,13 @@ import pc from 'picocolors';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { sep } from 'path';
-import { parseSource, getOwnerRepo, parseOwnerRepo, isRepoPrivate } from './source-parser.ts';
+import {
+  parseSource,
+  getOwnerRepo,
+  parseOwnerRepo,
+  isRepoPrivate,
+  getRepoSizeKB,
+} from './source-parser.ts';
 import { searchMultiselect, cancelSymbol } from './prompts/search-multiselect.ts';
 
 // Helper to check if a value is a cancel symbol (works with both clack and our custom prompts)
@@ -1381,7 +1387,18 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
     } else {
       // Clone repository for remote sources
       spinner.start('Cloning repository...');
-      tempDir = await cloneRepo(parsed.url, parsed.ref);
+
+      // Get repo size to decide between shallow clone (small repos) and sparse clone (large repos)
+      let repoSizeKB: number | null = null;
+      const ownerRepo = getOwnerRepo(parsed);
+      if (ownerRepo) {
+        const parts = parseOwnerRepo(ownerRepo);
+        if (parts) {
+          repoSizeKB = await getRepoSizeKB(parts.owner, parts.repo);
+        }
+      }
+
+      tempDir = await cloneRepo(parsed.url, parsed.ref, repoSizeKB);
       skillsDir = tempDir;
       spinner.stop('Repository cloned');
     }

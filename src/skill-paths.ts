@@ -5,7 +5,7 @@ import { agents } from './agents.ts';
  * Special skill discovery directories that are not agent-specific.
  * These are checked in addition to agent skillsDir paths.
  */
-const SPECIAL_SKILL_DIRS = ['skills', '.claude-plugin'];
+const SPECIAL_SKILL_DIRS = ['skills', '.claude-plugin', 'plugins'];
 
 /**
  * Get all directory paths that should be checked for skills during sparse checkout.

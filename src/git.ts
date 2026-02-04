@@ -6,6 +6,13 @@ import { getSkillDiscoveryPaths } from './skill-paths.ts';
 
 const CLONE_TIMEOUT_MS = 60000; // 60 seconds
 
+/**
+ * Repo size threshold (in KB) above which sparse checkout is used.
+ * For repos below this size, shallow clone is faster due to lower overhead.
+ * 50MB threshold based on benchmarks showing sparse checkout adds ~1.5s overhead.
+ */
+const SPARSE_CLONE_SIZE_THRESHOLD_KB = 50000; // 50MB
+
 export class GitCloneError extends Error {
   readonly url: string;
   readonly isTimeout: boolean;
@@ -21,25 +28,49 @@ export class GitCloneError extends Error {
 }
 
 /**
- * Clone a repository with sparse checkout optimization for large repos.
+ * Clone a repository with optional sparse checkout optimization for large repos.
  *
- * Uses partial clone (--filter=blob:none) with sparse checkout to only
- * download skill-related directories, dramatically reducing clone time
- * for large repositories like vercel/turborepo.
+ * For large repos (> 50MB), uses partial clone (--filter=blob:none) with sparse
+ * checkout to only download skill-related directories, dramatically reducing
+ * clone time for large repositories like vercel/turborepo.
  *
- * Falls back to regular shallow clone if sparse checkout is not supported
- * (Git < 2.25).
+ * For smaller repos, uses regular shallow clone which is faster due to
+ * lower overhead.
+ *
+ * @param url - The repository URL to clone
+ * @param ref - Optional branch/tag to checkout
+ * @param repoSizeKB - Optional repo size in KB. If > threshold, uses sparse clone.
+ *                     If null/undefined, defaults to shallow clone (safe default).
  */
-export async function cloneRepo(url: string, ref?: string): Promise<string> {
+export async function cloneRepo(
+  url: string,
+  ref?: string,
+  repoSizeKB?: number | null
+): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), 'skills-'));
   const git = simpleGit({ timeout: { block: CLONE_TIMEOUT_MS } });
 
-  // Try sparse clone first (faster for large repos)
+  const regularCloneOptions = ref ? ['--depth', '1', '--branch', ref] : ['--depth', '1'];
+
+  // Use sparse clone only for large repos (> 50MB)
+  // For smaller repos, shallow clone is faster due to less overhead
+  const useSparseClone = repoSizeKB != null && repoSizeKB > SPARSE_CLONE_SIZE_THRESHOLD_KB;
+
+  if (!useSparseClone) {
+    // Regular shallow clone for small/medium repos
+    try {
+      await git.clone(url, tempDir, regularCloneOptions);
+      return tempDir;
+    } catch (error) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      throw handleCloneError(error, url);
+    }
+  }
+
+  // Sparse clone for large repos
   const sparseCloneOptions = ref
     ? ['--depth', '1', '--filter=blob:none', '--sparse', '--branch', ref]
     : ['--depth', '1', '--filter=blob:none', '--sparse'];
-
-  const regularCloneOptions = ref ? ['--depth', '1', '--branch', ref] : ['--depth', '1'];
 
   try {
     await git.clone(url, tempDir, sparseCloneOptions);
@@ -76,52 +107,56 @@ export async function cloneRepo(url: string, ref?: string): Promise<string> {
         return retryTempDir;
       } catch (retryError) {
         await rm(retryTempDir, { recursive: true, force: true }).catch(() => {});
-        // Continue to error handling with the retry error
-        error = retryError;
+        throw handleCloneError(retryError, url);
       }
     }
 
     // Clean up temp dir on failure
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
-
-    const finalErrorMessage = error instanceof Error ? error.message : String(error);
-    const isTimeout =
-      finalErrorMessage.includes('block timeout') || finalErrorMessage.includes('timed out');
-    const isAuthError =
-      finalErrorMessage.includes('Authentication failed') ||
-      finalErrorMessage.includes('could not read Username') ||
-      finalErrorMessage.includes('Permission denied') ||
-      finalErrorMessage.includes('Repository not found');
-
-    if (isTimeout) {
-      throw new GitCloneError(
-        `Clone timed out after 60s. This can happen with:\n` +
-          `  - Private repos that require authentication\n` +
-          `  - Very large repositories\n\n` +
-          `  For authentication issues:\n` +
-          `  - For SSH: ssh-add -l (to check loaded keys)\n` +
-          `  - For HTTPS: gh auth status (if using GitHub CLI)\n\n` +
-          `  For large repos, try installing from a smaller fork or contact the skill author.`,
-        url,
-        true,
-        false
-      );
-    }
-
-    if (isAuthError) {
-      throw new GitCloneError(
-        `Authentication failed for ${url}.\n` +
-          `  - For private repos, ensure you have access\n` +
-          `  - For SSH: Check your keys with 'ssh -T git@github.com'\n` +
-          `  - For HTTPS: Run 'gh auth login' or configure git credentials`,
-        url,
-        false,
-        true
-      );
-    }
-
-    throw new GitCloneError(`Failed to clone ${url}: ${finalErrorMessage}`, url, false, false);
+    throw handleCloneError(error, url);
   }
+}
+
+/**
+ * Handle clone errors and convert to GitCloneError with appropriate messages.
+ */
+function handleCloneError(error: unknown, url: string): GitCloneError {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const isTimeout = errorMessage.includes('block timeout') || errorMessage.includes('timed out');
+  const isAuthError =
+    errorMessage.includes('Authentication failed') ||
+    errorMessage.includes('could not read Username') ||
+    errorMessage.includes('Permission denied') ||
+    errorMessage.includes('Repository not found');
+
+  if (isTimeout) {
+    return new GitCloneError(
+      `Clone timed out after 60s. This can happen with:\n` +
+        `  - Private repos that require authentication\n` +
+        `  - Very large repositories\n\n` +
+        `  For authentication issues:\n` +
+        `  - For SSH: ssh-add -l (to check loaded keys)\n` +
+        `  - For HTTPS: gh auth status (if using GitHub CLI)\n\n` +
+        `  For large repos, try installing from a smaller fork or contact the skill author.`,
+      url,
+      true,
+      false
+    );
+  }
+
+  if (isAuthError) {
+    return new GitCloneError(
+      `Authentication failed for ${url}.\n` +
+        `  - For private repos, ensure you have access\n` +
+        `  - For SSH: Check your keys with 'ssh -T git@github.com'\n` +
+        `  - For HTTPS: Run 'gh auth login' or configure git credentials`,
+      url,
+      false,
+      true
+    );
+  }
+
+  return new GitCloneError(`Failed to clone ${url}: ${errorMessage}`, url, false, false);
 }
 
 export async function cleanupTempDir(dir: string): Promise<void> {

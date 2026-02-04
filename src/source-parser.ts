@@ -54,6 +54,26 @@ export async function isRepoPrivate(owner: string, repo: string): Promise<boolea
 }
 
 /**
+ * Get the size of a GitHub repository in KB.
+ * Returns null if unable to determine (e.g., rate limited, private repo, or network error).
+ * Only works for GitHub repositories (GitLab not supported).
+ */
+export async function getRepoSizeKB(owner: string, repo: string): Promise<number | null> {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = (await res.json()) as { size?: number };
+    return data.size ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check if a string represents a local file system path
  */
 function isLocalPath(input: string): boolean {
