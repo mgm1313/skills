@@ -2,6 +2,7 @@ import simpleGit from 'simple-git';
 import { join, normalize, resolve, sep } from 'path';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
+import { getSkillDiscoveryPaths } from './skill-paths.ts';
 
 const CLONE_TIMEOUT_MS = 60000; // 60 seconds
 
@@ -19,32 +20,88 @@ export class GitCloneError extends Error {
   }
 }
 
+/**
+ * Clone a repository with sparse checkout optimization for large repos.
+ *
+ * Uses partial clone (--filter=blob:none) with sparse checkout to only
+ * download skill-related directories, dramatically reducing clone time
+ * for large repositories like vercel/turborepo.
+ *
+ * Falls back to regular shallow clone if sparse checkout is not supported
+ * (Git < 2.25).
+ */
 export async function cloneRepo(url: string, ref?: string): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), 'skills-'));
   const git = simpleGit({ timeout: { block: CLONE_TIMEOUT_MS } });
-  const cloneOptions = ref ? ['--depth', '1', '--branch', ref] : ['--depth', '1'];
+
+  // Try sparse clone first (faster for large repos)
+  const sparseCloneOptions = ref
+    ? ['--depth', '1', '--filter=blob:none', '--sparse', '--branch', ref]
+    : ['--depth', '1', '--filter=blob:none', '--sparse'];
+
+  const regularCloneOptions = ref ? ['--depth', '1', '--branch', ref] : ['--depth', '1'];
 
   try {
-    await git.clone(url, tempDir, cloneOptions);
+    await git.clone(url, tempDir, sparseCloneOptions);
+
+    // Set up sparse-checkout to fetch only skill-related directories
+    const repoGit = simpleGit(tempDir, { timeout: { block: CLONE_TIMEOUT_MS } });
+    try {
+      const skillPaths = getSkillDiscoveryPaths();
+      await repoGit.raw(['sparse-checkout', 'set', ...skillPaths]);
+    } catch {
+      // If sparse-checkout fails, disable sparse mode to get all files
+      // This can happen if the repo structure doesn't match expected paths
+      await repoGit.raw(['sparse-checkout', 'disable']).catch(() => {});
+    }
+
     return tempDir;
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // If sparse clone failed due to unsupported Git options, try regular clone
+    // This provides backwards compatibility with older Git versions (< 2.25)
+    if (
+      errorMessage.includes('unknown option') ||
+      errorMessage.includes('unrecognized argument') ||
+      errorMessage.includes('invalid filter-spec') ||
+      errorMessage.includes('--filter')
+    ) {
+      // Clean up failed sparse clone attempt
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+
+      const retryTempDir = await mkdtemp(join(tmpdir(), 'skills-'));
+      try {
+        await git.clone(url, retryTempDir, regularCloneOptions);
+        return retryTempDir;
+      } catch (retryError) {
+        await rm(retryTempDir, { recursive: true, force: true }).catch(() => {});
+        // Continue to error handling with the retry error
+        error = retryError;
+      }
+    }
+
     // Clean up temp dir on failure
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const isTimeout = errorMessage.includes('block timeout') || errorMessage.includes('timed out');
+    const finalErrorMessage = error instanceof Error ? error.message : String(error);
+    const isTimeout =
+      finalErrorMessage.includes('block timeout') || finalErrorMessage.includes('timed out');
     const isAuthError =
-      errorMessage.includes('Authentication failed') ||
-      errorMessage.includes('could not read Username') ||
-      errorMessage.includes('Permission denied') ||
-      errorMessage.includes('Repository not found');
+      finalErrorMessage.includes('Authentication failed') ||
+      finalErrorMessage.includes('could not read Username') ||
+      finalErrorMessage.includes('Permission denied') ||
+      finalErrorMessage.includes('Repository not found');
 
     if (isTimeout) {
       throw new GitCloneError(
-        `Clone timed out after 60s. This often happens with private repos that require authentication.\n` +
-          `  Ensure you have access and your SSH keys or credentials are configured:\n` +
+        `Clone timed out after 60s. This can happen with:\n` +
+          `  - Private repos that require authentication\n` +
+          `  - Very large repositories\n\n` +
+          `  For authentication issues:\n` +
           `  - For SSH: ssh-add -l (to check loaded keys)\n` +
-          `  - For HTTPS: gh auth status (if using GitHub CLI)`,
+          `  - For HTTPS: gh auth status (if using GitHub CLI)\n\n` +
+          `  For large repos, try installing from a smaller fork or contact the skill author.`,
         url,
         true,
         false
@@ -63,7 +120,7 @@ export async function cloneRepo(url: string, ref?: string): Promise<string> {
       );
     }
 
-    throw new GitCloneError(`Failed to clone ${url}: ${errorMessage}`, url, false, false);
+    throw new GitCloneError(`Failed to clone ${url}: ${finalErrorMessage}`, url, false, false);
   }
 }
 

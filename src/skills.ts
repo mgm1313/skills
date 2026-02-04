@@ -3,6 +3,7 @@ import { join, basename, dirname } from 'path';
 import matter from 'gray-matter';
 import type { Skill } from './types.ts';
 import { getPluginSkillPaths } from './plugin-manifest.ts';
+import { getSkillSearchDirs } from './skill-paths.ts';
 
 const SKIP_DIRS = ['node_modules', '.git', 'dist', 'build', '__pycache__'];
 
@@ -110,39 +111,8 @@ export async function discoverSkills(
     }
   }
 
-  // Search common skill locations first
-  const prioritySearchDirs = [
-    searchPath,
-    join(searchPath, 'skills'),
-    join(searchPath, 'skills/.curated'),
-    join(searchPath, 'skills/.experimental'),
-    join(searchPath, 'skills/.system'),
-    join(searchPath, '.agent/skills'),
-    join(searchPath, '.agents/skills'),
-    join(searchPath, '.claude/skills'),
-    join(searchPath, '.cline/skills'),
-    join(searchPath, '.codebuddy/skills'),
-    join(searchPath, '.codex/skills'),
-    join(searchPath, '.commandcode/skills'),
-    join(searchPath, '.continue/skills'),
-    join(searchPath, '.cursor/skills'),
-    join(searchPath, '.github/skills'),
-    join(searchPath, '.goose/skills'),
-    join(searchPath, '.iflow/skills'),
-    join(searchPath, '.junie/skills'),
-    join(searchPath, '.kilocode/skills'),
-    join(searchPath, '.kiro/skills'),
-    join(searchPath, '.mux/skills'),
-    join(searchPath, '.neovate/skills'),
-    join(searchPath, '.opencode/skills'),
-    join(searchPath, '.openhands/skills'),
-    join(searchPath, '.pi/skills'),
-    join(searchPath, '.qoder/skills'),
-    join(searchPath, '.roo/skills'),
-    join(searchPath, '.trae/skills'),
-    join(searchPath, '.windsurf/skills'),
-    join(searchPath, '.zencoder/skills'),
-  ];
+  // Search common skill locations first (uses shared paths from skill-paths.ts)
+  const prioritySearchDirs = getSkillSearchDirs(searchPath);
 
   // Add skill paths declared in plugin manifests
   prioritySearchDirs.push(...(await getPluginSkillPaths(searchPath)));
